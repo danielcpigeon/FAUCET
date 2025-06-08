@@ -1,2 +1,2 @@
 # FAUCET
-FAUCT - Free And Unrestricted CVE Enrichment Tool
+FAUCET - Free And Unrestricted CVE Enrichment Tool
