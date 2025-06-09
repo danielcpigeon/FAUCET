@@ -1,82 +1,64 @@
-#!/bin/bash
-# Initialize and configure MySQL database for F.A.U.C.E.T.
-# This will create the 'faucet' database, tables, and a user with appropriate privileges.
-mysql -u root -p <<EOF
-CREATE DATABASE IF NOT EXISTS faucet;
-USE faucet;
--- Main CVE table (NVD data)
-CREATE TABLE IF NOT EXISTS cve_main (
-  cve_id VARCHAR(25) PRIMARY KEY,
-  description TEXT,
-  published_date DATE,
-  last_modified_date DATE,
-  cvss2_score FLOAT,
-  cvss2_vector VARCHAR(100),
-  cvss2_severity VARCHAR(20),
-  cvss3_score FLOAT,
-  cvss3_vector VARCHAR(200),
-  cvss3_severity VARCHAR(20),
-  last_fetch_date DATETIME
-) ENGINE=InnoDB;
--- Table for CVE to CWE mappings
-CREATE TABLE IF NOT EXISTS cve_cwe (
-  cve_id VARCHAR(25),
-  cwe_id VARCHAR(25),
-  cwe_name VARCHAR(255),
-  PRIMARY KEY (cve_id, cwe_id),
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Table for affected product CPEs
-CREATE TABLE IF NOT EXISTS cve_cpe (
-  cve_id VARCHAR(25),
-  cpe_uri VARCHAR(255),
-  PRIMARY KEY (cve_id, cpe_uri),
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Table for EPSS scores
-CREATE TABLE IF NOT EXISTS cve_epss (
-  cve_id VARCHAR(25) PRIMARY KEY,
-  epss_score FLOAT,
-  epss_percentile FLOAT,
-  last_update DATE,
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Table for Known Exploited Vulnerabilities (CISA KEV)
-CREATE TABLE IF NOT EXISTS cve_kev (
-  cve_id VARCHAR(25) PRIMARY KEY,
-  date_added DATE,
-  due_date DATE,
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Table for exploit references
-CREATE TABLE IF NOT EXISTS cve_exploits (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  cve_id VARCHAR(25),
-  source VARCHAR(50),
-  info VARCHAR(255),
-  detail TEXT,
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Table for social media mentions
-CREATE TABLE IF NOT EXISTS cve_social (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  cve_id VARCHAR(25),
-  platform VARCHAR(50),
-  content TEXT,
-  url TEXT,
-  mention_date DATE,
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Table for reference links
-CREATE TABLE IF NOT EXISTS cve_refs (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  cve_id VARCHAR(25),
-  url TEXT,
-  description TEXT,
-  FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
--- Create an application user and grant privileges
-CREATE USER IF NOT EXISTS 'faucetuser'@'localhost' IDENTIFIED BY 'StrongPassword!';
-GRANT ALL PRIVILEGES ON faucet.* TO 'faucetuser'@'localhost';
-FLUSH PRIVILEGES;
-EOF
+#!/usr/bin/env python3
+"""
+buildnvd.py – Script to fetch CVE data from the NIST NVD API and store it in the local MySQL database for F.A.U.C.E.T.
+"""
+import os
+import pymysql
+import requests
+from datetime import datetime
+
+# Configuration from environment variables
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_NAME = os.getenv('DB_NAME', 'faucet')
+DB_USER = os.getenv('DB_USER', 'faucetuser')
+DB_PASS = os.getenv('DB_PASS', 'StrongPassword!')
+NVD_API_KEY = os.getenv('NVD_API_KEY')
+
+# Connect to the database
+def get_db_connection():
+    return pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, db=DB_NAME)
+
+# Fetch CVE data from NVD API
+def fetch_nvd_data(cve_id):
+    headers = {'apiKey': NVD_API_KEY}
+    response = requests.get(f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}', headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+# Insert or update CVE data into DB
+def store_cve_data(cve_id, data):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    description = data['vulnerabilities'][0]['cve']['descriptions'][0]['value']
+    published_date = data['vulnerabilities'][0]['cve']['published']
+    last_modified_date = data['vulnerabilities'][0]['cve']['lastModified']
+
+    cursor.execute("""
+        INSERT INTO cve_main (cve_id, description, published_date, last_modified_date, last_fetch_date)
+        VALUES (%s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            description = VALUES(description),
+            published_date = VALUES(published_date),
+            last_modified_date = VALUES(last_modified_date),
+            last_fetch_date = VALUES(last_fetch_date)
+    """, (cve_id, description, published_date, last_modified_date, datetime.utcnow()))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# Main script execution
+def main():
+    # Example CVE list; replace with actual retrieval logic
+    cve_list = ['CVE-2024-21401', 'CVE-2024-12345']
+    for cve_id in cve_list:
+        try:
+            data = fetch_nvd_data(cve_id)
+            store_cve_data(cve_id, data)
+            print(f"Stored data for {cve_id}")
+        except Exception as e:
+            print(f"Error fetching/storing data for {cve_id}: {e}")
+
+if __name__ == '__main__':
+    main()
