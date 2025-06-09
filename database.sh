@@ -5,8 +5,16 @@
 # Load environment variables
 source /etc/environment
 
+# Use non-interactive authentication if MYSQL_ROOT_PASSWORD is set
+MYSQL_AUTH="-u root"
+if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
+    MYSQL_AUTH+=" -p${MYSQL_ROOT_PASSWORD}"
+else
+    MYSQL_AUTH+=" -p"
+fi
+
 # Connect to MySQL and set up database and tables
-mysql -u root -p <<EOF
+mysql "$MYSQL_AUTH" <<EOF
 CREATE DATABASE IF NOT EXISTS ${DB_NAME};
 CREATE USER IF NOT EXISTS '${DB_USER}'@'${DB_HOST}' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'${DB_HOST}';
@@ -35,8 +43,8 @@ CREATE TABLE IF NOT EXISTS cwe (
 -- Table for CPE data
 CREATE TABLE IF NOT EXISTS cpe (
     cve_id VARCHAR(20),
-    cpe_entry TEXT,
-    PRIMARY KEY (cve_id, cpe_entry(255)),
+    cpe_entry VARCHAR(255),
+    PRIMARY KEY (cve_id, cpe_entry),
     FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
 );
 
@@ -78,7 +86,7 @@ CREATE TABLE IF NOT EXISTS social_mentions (
 );
 
 -- Table for References
-CREATE TABLE IF NOT EXISTS references (
+CREATE TABLE IF NOT EXISTS cve_references (
     id INT AUTO_INCREMENT PRIMARY KEY,
     cve_id VARCHAR(20),
     description TEXT,
