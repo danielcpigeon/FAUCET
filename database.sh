@@ -1,64 +1,92 @@
-#!/usr/bin/env python3
-"""
-buildnvd.py – Script to fetch CVE data from the NIST NVD API and store it in the local MySQL database for F.A.U.C.E.T.
-"""
-import os
-import pymysql
-import requests
-from datetime import datetime
+#!/bin/bash
 
-# Configuration from environment variables
-DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_NAME = os.getenv('DB_NAME', 'faucet')
-DB_USER = os.getenv('DB_USER', 'faucetuser')
-DB_PASS = os.getenv('DB_PASS', 'StrongPassword!')
-NVD_API_KEY = os.getenv('NVD_API_KEY')
+# Database configuration script for F.A.U.C.E.T. (Free And Unrestricted CVE Enrichment Tool)
 
-# Connect to the database
-def get_db_connection():
-    return pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, db=DB_NAME)
+# Load environment variables
+source /etc/environment
 
-# Fetch CVE data from NVD API
-def fetch_nvd_data(cve_id):
-    headers = {'apiKey': NVD_API_KEY}
-    response = requests.get(f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}', headers=headers)
-    response.raise_for_status()
-    return response.json()
+# Connect to MySQL and set up database and tables
+mysql -u root -p <<EOF
+CREATE DATABASE IF NOT EXISTS ${DB_NAME};
+CREATE USER IF NOT EXISTS '${DB_USER}'@'${DB_HOST}' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'${DB_HOST}';
+FLUSH PRIVILEGES;
 
-# Insert or update CVE data into DB
-def store_cve_data(cve_id, data):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+USE ${DB_NAME};
 
-    description = data['vulnerabilities'][0]['cve']['descriptions'][0]['value']
-    published_date = data['vulnerabilities'][0]['cve']['published']
-    last_modified_date = data['vulnerabilities'][0]['cve']['lastModified']
+-- Main table for CVE details
+CREATE TABLE IF NOT EXISTS cve_main (
+    cve_id VARCHAR(20) PRIMARY KEY,
+    description TEXT,
+    published_date DATETIME,
+    last_modified_date DATETIME,
+    last_fetch_date DATETIME
+);
 
-    cursor.execute("""
-        INSERT INTO cve_main (cve_id, description, published_date, last_modified_date, last_fetch_date)
-        VALUES (%s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            description = VALUES(description),
-            published_date = VALUES(published_date),
-            last_modified_date = VALUES(last_modified_date),
-            last_fetch_date = VALUES(last_fetch_date)
-    """, (cve_id, description, published_date, last_modified_date, datetime.utcnow()))
+-- Table for CWE data
+CREATE TABLE IF NOT EXISTS cwe (
+    cve_id VARCHAR(20),
+    cwe_id VARCHAR(20),
+    name VARCHAR(255),
+    PRIMARY KEY (cve_id, cwe_id),
+    FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
+);
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+-- Table for CPE data
+CREATE TABLE IF NOT EXISTS cpe (
+    cve_id VARCHAR(20),
+    cpe_entry TEXT,
+    PRIMARY KEY (cve_id, cpe_entry(255)),
+    FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
+);
 
-# Main script execution
-def main():
-    # Example CVE list; replace with actual retrieval logic
-    cve_list = ['CVE-2024-21401', 'CVE-2024-12345']
-    for cve_id in cve_list:
-        try:
-            data = fetch_nvd_data(cve_id)
-            store_cve_data(cve_id, data)
-            print(f"Stored data for {cve_id}")
-        except Exception as e:
-            print(f"Error fetching/storing data for {cve_id}: {e}")
+-- Table for Risk scoring (CVSS, EPSS, KEV)
+CREATE TABLE IF NOT EXISTS risk_scoring (
+    cve_id VARCHAR(20) PRIMARY KEY,
+    cvss3_score FLOAT,
+    cvss3_severity VARCHAR(20),
+    cvss3_vector VARCHAR(100),
+    cvss2_score FLOAT,
+    cvss2_severity VARCHAR(20),
+    cvss2_vector VARCHAR(100),
+    epss_score FLOAT,
+    epss_percentile FLOAT,
+    kev BOOLEAN,
+    kev_date DATE,
+    FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
+);
 
-if __name__ == '__main__':
-    main()
+-- Table for Exploit data
+CREATE TABLE IF NOT EXISTS exploits (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    cve_id VARCHAR(20),
+    source VARCHAR(50),
+    name VARCHAR(255),
+    description TEXT,
+    url TEXT,
+    FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
+);
+
+-- Table for Social Media mentions
+CREATE TABLE IF NOT EXISTS social_mentions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    cve_id VARCHAR(20),
+    platform VARCHAR(50),
+    text TEXT,
+    url TEXT,
+    FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
+);
+
+-- Table for References
+CREATE TABLE IF NOT EXISTS references (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    cve_id VARCHAR(20),
+    description TEXT,
+    url TEXT,
+    FOREIGN KEY (cve_id) REFERENCES cve_main(cve_id)
+);
+
+EOF
+
+# Indicate script completion
+echo "Database setup complete."
