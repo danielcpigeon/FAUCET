@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 import requests
 import pymysql
-from flask import Flask, request, render_template, redirect, url_for, abort
+from flask import Flask, request, render_template, redirect, url_for, abort, send_file
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from requests.auth import HTTPBasicAuth
@@ -21,7 +21,8 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_NAME = os.getenv("DB_NAME", "faucet")
 DB_USER = os.getenv("DB_USER", "faucetuser")
 DB_PASS = os.getenv("DB_PASS", "StrongPassword!")
-RECAPTCHA_SITE_ID = os.getenv("RECAPTCHA_SITE_ID")
+RECAPTCHA_SITE_KEY = os.getenv("RECAPTCHA_SITE_KEY")
+RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
 GCP_API_KEY = os.getenv("GCP_API_KEY")
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 NVD_API_KEY = os.getenv("NVD_API_KEY")
@@ -43,6 +44,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+# Reusable HTTP session
+session = requests.Session()
+session.headers.update({"User-Agent": "FaucetCVE/1.0"})
+
+# Precompiled CVE ID pattern
+CVE_PATTERN = re.compile(r"^CVE-\d{4}-\d+$", re.IGNORECASE)
+
 
 # Verify reCAPTCHA Enterprise response
 def verify_recaptcha(token):
@@ -50,39 +58,18 @@ def verify_recaptcha(token):
     payload = {
         "event": {
             "token": token,
-            "siteKey": RECAPTCHA_SITE_ID,
+            "siteKey": RECAPTCHA_SITE_KEY,
             "expectedAction": "LOGIN",
         }
     }
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = session.post(url, json=payload, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException as exc:
         logging.error("reCAPTCHA verification failed: %s", exc)
         return {}
 
-
-@app.route("/", methods=["GET", "POST"])
-def index():
-    if request.method == "POST":
-        token = request.form.get("g-recaptcha-response")
-        verification_result = verify_recaptcha(token)
-
-        if (
-            verification_result.get("tokenProperties", {}).get("valid")
-            and verification_result.get("riskAnalysis", {}).get("score", 0) > 0.5
-        ):
-            cve_id = request.form.get("cve_id", "").strip()
-            # (Continue with existing CVE processing logic)
-            return redirect(url_for("cve_page", cve_id=cve_id))
-        else:
-            error = "reCAPTCHA verification failed."
-            return render_template(
-                "faucet.html", recaptcha_site_id=RECAPTCHA_SITE_ID, error=error
-            )
-
-    return render_template("faucet.html", recaptcha_site_id=RECAPTCHA_SITE_ID)
 
 # Utility: Database connection (helper function to get a new connection)
 def get_db_connection():
@@ -92,7 +79,7 @@ def get_db_connection():
 def fetch_epss(cve_id):
     epss_url = f"https://api.first.org/data/v1/epss?cve={cve_id}"
     try:
-        resp = requests.get(epss_url, timeout=5)
+        resp = session.get(epss_url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             # data['data'] is a list of CVE info with 'epss' and 'percentile'
@@ -116,14 +103,14 @@ def check_kev(cve_id, db_cursor):
     # If not found locally, optionally check live KEV API for assurance
     try:
         kev_check_url = f"https://kevin.gtfkd.com/kev/exists?cve={cve_id}"  # KEVin API for KEV:contentReference[oaicite:4]{index=4}
-        resp = requests.get(kev_check_url, timeout=5)
+        resp = session.get(kev_check_url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if "exists" in data:
                 exists = data["exists"]
                 if exists:
                     # Fetch details for date if needed
-                    detail_resp = requests.get(f"https://kevin.gtfkd.com/kev/{cve_id}", timeout=5)
+                    detail_resp = session.get(f"https://kevin.gtfkd.com/kev/{cve_id}", timeout=5)
                     if detail_resp.status_code == 200:
                         detail = detail_resp.json()
                         date_added = detail.get("dateAdded") or detail.get("date_added")
@@ -144,7 +131,7 @@ def search_exploitdb(cve_id):
     url = f"https://www.exploit-db.com/search?cve={cve_id}"
     headers = {"User-Agent": "FaucetCVE/1.0"}
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = session.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             text = resp.text
             # Find exploit entries in the HTML (id and title)
@@ -169,7 +156,7 @@ def search_metasploit(cve_id):
     if GITHUB_TOKEN:
         headers["Authorization"] = f"token {GITHUB_TOKEN}"
     try:
-        resp = requests.get(api_url, headers=headers, timeout=10)
+        resp = session.get(api_url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             for item in data.get("items", []):
@@ -192,7 +179,7 @@ def search_nuclei_templates(cve_id):
     if GITHUB_TOKEN:
         headers["Authorization"] = f"token {GITHUB_TOKEN}"
     try:
-        resp = requests.get(api_url, headers=headers, timeout=10)
+        resp = session.get(api_url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             for item in data.get("items", []):
@@ -214,7 +201,7 @@ def search_social(cve_id):
         headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
         params = {"query": query, "max_results": 5, "tweet.fields": "text,created_at,author_id"}
         try:
-            resp = requests.get(twitter_api, headers=headers, params=params, timeout=5)
+            resp = session.get(twitter_api, headers=headers, params=params, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 for tweet in data.get("data", []):
@@ -231,12 +218,12 @@ def search_social(cve_id):
             auth = requests.auth.HTTPBasicAuth(REDDIT_CLIENT_ID, REDDIT_SECRET)
             data = {"grant_type": "client_credentials"}
             headers = {"User-Agent": "FaucetCVE/1.0"}
-            token_res = requests.post("https://www.reddit.com/api/v1/access_token", auth=auth, data=data, headers=headers)
+            token_res = session.post("https://www.reddit.com/api/v1/access_token", auth=auth, data=data, headers=headers)
             if token_res.status_code == 200:
                 token = token_res.json().get("access_token")
                 if token:
                     headers["Authorization"] = f"bearer {token}"
-                    search_res = requests.get(f"https://oauth.reddit.com/search?q={cve_id}&limit=5", headers=headers)
+                    search_res = session.get(f"https://oauth.reddit.com/search?q={cve_id}&limit=5", headers=headers)
                     if search_res.status_code == 200:
                         posts = search_res.json().get("data", {}).get("children", [])
                         for post in posts:
@@ -261,7 +248,7 @@ def index():
     user_agent = request.headers.get('User-Agent', '')[:100]
     cve_id = request.form.get('cve_id', '').strip()
     # Validate CVE ID format
-    if not re.match(r'^CVE-\d{4}-\d+$', cve_id, flags=re.IGNORECASE):
+    if not CVE_PATTERN.match(cve_id):
         error_msg = "Invalid CVE ID format. Please use CVE-YYYY-XXXX."
         logging.info({"remote_addr": user_ip, "user_agent": user_agent, "message": f"Invalid CVE format: {cve_id}"})
         return render_template('faucet.html', recaptcha_site_key=RECAPTCHA_SITE_KEY, data=None, error=error_msg)
@@ -270,8 +257,11 @@ def index():
     token = request.form.get('recaptcha_token')
     if RECAPTCHA_SECRET_KEY:
         try:
-            verify_resp = requests.post("https://www.google.com/recaptcha/api/siteverify",
-                                        data={'secret': RECAPTCHA_SECRET_KEY, 'response': token, 'remoteip': user_ip}, timeout=5)
+            verify_resp = session.post(
+                "https://www.google.com/recaptcha/api/siteverify",
+                data={'secret': RECAPTCHA_SECRET_KEY, 'response': token, 'remoteip': user_ip},
+                timeout=5,
+            )
             verify_result = verify_resp.json()
         except Exception as e:
             verify_result = {}
@@ -383,7 +373,7 @@ def index():
             nvd_url += f"&apiKey={NVD_API_KEY}"
         cve_json = {}
         try:
-            nvd_resp = requests.get(nvd_url, timeout=10)
+            nvd_resp = session.get(nvd_url, timeout=10)
             if nvd_resp.status_code == 200:
                 result = nvd_resp.json()
                 if result.get("vulnerabilities"):
@@ -566,7 +556,7 @@ def index():
 @app.route('/<cve_id>/')
 def cve_page(cve_id):
     # Only allow valid CVE pattern to avoid any malicious path input
-    if not re.match(r'^CVE-\d{4}-\d+$', cve_id, flags=re.IGNORECASE):
+    if not CVE_PATTERN.match(cve_id):
         abort(404)
     cache_path = os.path.join("cache", f"{cve_id}.html")
     if os.path.exists(cache_path):
